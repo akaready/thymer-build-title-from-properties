@@ -1,0 +1,13 @@
+{
+	"ver": 1,
+	"name": "Build Title from Properties",
+	"icon": "file-text",
+	"description": "Build collection item display titles from selected property values.",
+	"author": "@akaready",
+	"homepage": "https://akaready.com",
+	"repository": "https://github.com/akaready/thymer-build-title-from-properties",
+	"coffee": "https://buymeacoffee.com/akaready",
+	"custom": {
+		"schemaVersion": 1
+	}
+}
