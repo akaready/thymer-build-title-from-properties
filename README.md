@@ -14,6 +14,7 @@ Enjoy! 🙏
   </a>
 </p>
 
+![Build Title from Properties settings panel](./build-title-from-properties.png)
 
 &nbsp;
 
