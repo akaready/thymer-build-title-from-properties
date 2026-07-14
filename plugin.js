@@ -2807,7 +2807,8 @@ class Plugin extends CollectionPlugin {
     try {
       new Function(text);
     } catch (e) {
-      return { ok: false, reason: `would not parse \u2014 ${e.message}` };
+      const message = e instanceof Error ? e.message : String(e);
+      return { ok: false, reason: `would not parse \u2014 ${message}` };
     }
     if (!/\bclass\s+Plugin\b|\bvar\s+Plugin\s*=|\bPlugin\s*=\s*class\b/.test(text)) {
       return { ok: false, reason: "declares no Plugin class \u2014 the collection would not load" };
