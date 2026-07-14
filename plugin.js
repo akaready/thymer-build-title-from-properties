@@ -521,6 +521,19 @@ var plugins = (() => {
   opacity: 1;
 }
 
+/* Device cannot persist settings locally \u2014 the store is falling back to the
+   synced config so nothing is lost. Warning tone, full-perimeter border. */
+.tps-scope-pill[data-local-unavailable="true"] {
+  color: var(--enum-red-fg, #d64545);
+  border-color: var(--enum-red-border, rgba(214, 69, 69, 0.5));
+  background: var(--enum-red-bg, rgba(214, 69, 69, 0.12));
+}
+
+.tps-scope-pill[data-local-unavailable="true"] .tps-scope-dot {
+  background: var(--enum-red-fg, #d64545);
+  opacity: 1;
+}
+
 .tps-scope-btn {
   display: inline-flex;
   align-items: center;
@@ -2252,6 +2265,23 @@ ${report}
   }
   __name(scopeSvgIcon, "scopeSvgIcon");
   function scopeCluster(scope) {
+    if (scope.localUnavailable) {
+      return h(
+        "span",
+        { class: "tps-scope" },
+        h(
+          "span",
+          {
+            class: "tps-scope-pill tooltip",
+            "data-local-unavailable": "true",
+            "data-tooltip": "This device can't store settings locally, so they're saved to all devices instead.",
+            "data-tooltip-dir": "top"
+          },
+          h("span", { class: "tps-scope-dot", "aria-hidden": "true" }),
+          "All devices (no local storage)"
+        )
+      );
+    }
     const pill = h(
       "span",
       {
