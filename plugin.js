@@ -2683,13 +2683,148 @@ ${report}
   }
   __name(setPluginDisabled, "setPluginDisabled");
 
+  // ../../shared/collection-code.js
+  function patchBlockMarkers(pluginName) {
+    return {
+      start: `/* ${pluginName}: managed collection hook - begin */`,
+      end: `/* ${pluginName}: managed collection hook - end */`
+    };
+  }
+  __name(patchBlockMarkers, "patchBlockMarkers");
+  var ANY_PATCH_BLOCK = /\/\* (.+?): managed collection hook - begin \*\/[\s\S]*?\/\* \1: managed collection hook - end \*\//g;
+  function extractPatchBlocks(code) {
+    const out = [];
+    const text = String(code || "");
+    for (const m of text.matchAll(ANY_PATCH_BLOCK)) out.push({ name: m[1], text: m[0] });
+    return out;
+  }
+  __name(extractPatchBlocks, "extractPatchBlocks");
+  function stripAllPatchBlocks(code) {
+    return String(code || "").replace(ANY_PATCH_BLOCK, "").replace(/\n{3,}/g, "\n\n").trim();
+  }
+  __name(stripAllPatchBlocks, "stripAllPatchBlocks");
+  function replaceOrAppendPatchBlock(code, markers, block) {
+    const text = String(code || "");
+    const start = text.indexOf(markers.start);
+    const end = text.indexOf(markers.end);
+    if (start >= 0 && end > start) {
+      return `${text.slice(0, start)}${block}${text.slice(end + markers.end.length)}`;
+    }
+    return text.trim() ? `${text.trimEnd()}
+
+${block}
+` : `${block}
+`;
+  }
+  __name(replaceOrAppendPatchBlock, "replaceOrAppendPatchBlock");
+  function makePrototypePatchBlock({ pluginName, bodyJs, helpersJs = "" }) {
+    const { start, end } = patchBlockMarkers(pluginName);
+    return `${start}
+(function () {
+	try {
+		if (typeof Plugin === 'undefined' || !Plugin || !Plugin.prototype) return;
+		var __proto = Plugin.prototype;
+		var __prev = __proto.onLoad;
+		// A class-field onLoad lives on the instance, not here \u2014 we cannot wrap it. Bail rather
+		// than half-apply; the host keeps working and the plugin reports the collection as unhookable.
+		if (typeof __prev !== 'function') return;
+		__proto.onLoad = function () {
+			__prev.call(this);              // host plugin runs first, entirely untouched
+			try { ${bodyJs} } catch (e) {}  // our hook must never take the host down with it
+		};
+	} catch (e) {}
+})();
+${helpersJs}
+${end}`;
+  }
+  __name(makePrototypePatchBlock, "makePrototypePatchBlock");
+  function classifyCollectionCode(code) {
+    const text = String(code || "");
+    const blocks = extractPatchBlocks(text);
+    const rest = stripCodeCommentsAndStrings(stripAllPatchBlocks(text));
+    const hasOwnerLogic = OWNER_SIGNALS.some((sig) => rest.includes(sig));
+    if (hasOwnerLogic) return { kind: "owner", patches: blocks, occupant: attributeOccupant(text) };
+    return { kind: blocks.length ? "patched" : "blank", patches: blocks, occupant: "" };
+  }
+  __name(classifyCollectionCode, "classifyCollectionCode");
+  var OWNER_SIGNALS = Object.freeze([
+    "customizeRecordTitle",
+    "customizeSidebarItems",
+    "setSidebarWidget",
+    "addCollectionNavigationButton",
+    "this.properties",
+    "this.views",
+    "this.collection",
+    "this.events",
+    "this.data",
+    "this.ws",
+    "localStorage",
+    "fetch",
+    "savePlugin",
+    "saveConfiguration",
+    "previewPlugin",
+    "insertFromMarkdown",
+    "createRecord",
+    "createLineItem",
+    "prop(",
+    "setName"
+  ]);
+  var KNOWN_OCCUPANTS = Object.freeze([
+    ["plg-recall-ai", "Recall.ai Meetings"],
+    ["plg-collection-icons", "Collection Icons"],
+    ["Build Title from Properties", "Build Title from Properties"]
+  ]);
+  function attributeOccupant(code) {
+    const text = String(code || "");
+    const hit = KNOWN_OCCUPANTS.find(([needle]) => text.includes(needle));
+    return hit ? hit[1] : "another plugin";
+  }
+  __name(attributeOccupant, "attributeOccupant");
+  function stripCodeCommentsAndStrings(code) {
+    return String(code || "").replace(/\/\*[\s\S]*?\*\//g, "").replace(/\/\/[^\n]*/g, "").replace(/'(?:\\.|[^'\\])*'/g, "''").replace(/"(?:\\.|[^"\\])*"/g, '""').replace(/`(?:\\.|[^`\\])*`/g, "``");
+  }
+  __name(stripCodeCommentsAndStrings, "stripCodeCommentsAndStrings");
+  var STUB_MARKER = "/* thymer-collection-stub */";
+  var STUB_OWNER_CLASS = `${STUB_MARKER}
+class Plugin extends CollectionPlugin {
+	onLoad() {}
+	onUnload() {}
+}`;
+  function stripStubOwner(code) {
+    const text = String(code || "");
+    const at = text.indexOf(STUB_OWNER_CLASS);
+    if (at < 0) return text;
+    return `${text.slice(0, at)}${text.slice(at + STUB_OWNER_CLASS.length)}`.replace(/\n{3,}/g, "\n\n").trim();
+  }
+  __name(stripStubOwner, "stripStubOwner");
+  function declaresPluginOwner(code) {
+    const host = stripStubOwner(String(code || ""));
+    return /\bclass\s+Plugin\b|\bvar\s+Plugin\s*=|\bPlugin\s*=\s*class\b/.test(host);
+  }
+  __name(declaresPluginOwner, "declaresPluginOwner");
+  function assertCodeSafe(code) {
+    const text = String(code || "");
+    try {
+      new Function(text);
+    } catch (e) {
+      return { ok: false, reason: `would not parse \u2014 ${e.message}` };
+    }
+    if (!/\bclass\s+Plugin\b|\bvar\s+Plugin\s*=|\bPlugin\s*=\s*class\b/.test(text)) {
+      return { ok: false, reason: "declares no Plugin class \u2014 the collection would not load" };
+    }
+    return { ok: true };
+  }
+  __name(assertCodeSafe, "assertCodeSafe");
+
   // plugin.js
-  var PLUGIN_VERSION = "1.1.6";
+  var PLUGIN_VERSION = "1.2.2";
   var ROOT_CLASS = "plg-build-title-from-properties";
   var PANEL_TYPE = "build-title-from-properties-settings";
   var CONFIG_KEY = "buildTitle";
-  var MANAGED_START = "/* Build Title from Properties: managed collection hook - begin */";
-  var MANAGED_END = "/* Build Title from Properties: managed collection hook - end */";
+  var PLUGIN_DISPLAY_NAME = "Build Title from Properties";
+  var MANAGED_MARKERS = patchBlockMarkers(PLUGIN_DISPLAY_NAME);
+  var MANAGED_START = MANAGED_MARKERS.start;
+  var MANAGED_END = MANAGED_MARKERS.end;
   var DEFAULT_BUILD_TITLE = Object.freeze({
     version: 1,
     enabled: true,
@@ -3271,6 +3406,7 @@ ${report}
     }
     async _migrateManagedHooksInBackground() {
       if (this._managedMigrationPromise) return this._managedMigrationPromise;
+      this._migrationRefusals = [];
       this._managedMigrationPromise = (async () => {
         let collections;
         try {
@@ -3278,14 +3414,22 @@ ${report}
         } catch {
           return;
         }
-        const managedCode = makeManagedCollectionCode();
         for (const collection of collections || []) {
           try {
             const existing = await collection.getExistingCodeAndConfig();
             const code = existing && typeof existing.code === "string" ? existing.code : "";
-            if (classifyCode(code) !== "managed") continue;
-            const nextCode = replaceManagedBlock(code, managedCode);
+            const status = classifyCode(code);
+            const jsonNow = existing && existing.json ? existing.json : collection.getConfiguration ? collection.getConfiguration() : {};
+            const cfgNow = jsonNow && jsonNow.custom ? jsonNow.custom[CONFIG_KEY] : null;
+            const weManageIt = status === "managed" || cfgNow && typeof cfgNow === "object";
+            if (!weManageIt) continue;
+            const nextCode = composeManagedCode(code);
             if (nextCode === code) continue;
+            const safe = assertCodeSafe(nextCode);
+            if (!safe.ok) {
+              this._migrationRefusals.push(`${collection.getName ? collection.getName() : "collection"}: ${safe.reason}`);
+              continue;
+            }
             const json = existing && existing.json ? existing.json : collection.getConfiguration ? collection.getConfiguration() : {};
             const ok = await collection.savePlugin(json, nextCode);
             if (!ok) continue;
@@ -3302,6 +3446,9 @@ ${report}
         await this._managedMigrationPromise;
       } finally {
         this._managedMigrationPromise = null;
+      }
+      if (this._migrationRefusals.length && this.ui && typeof this.ui.addToaster === "function") {
+        this.ui.addToaster(`Build Title left ${this._migrationRefusals.length} collection(s) untouched: ${this._migrationRefusals.join("; ")}`, "error");
       }
     }
     _exitEdit() {
@@ -3448,8 +3595,9 @@ ${report}
         const nextJson = cloneJson(state.json);
         nextJson.custom = nextJson.custom && typeof nextJson.custom === "object" ? nextJson.custom : {};
         nextJson.custom[CONFIG_KEY] = nextConfig;
-        const managedCode = makeManagedCollectionCode();
-        const nextCode = state.status === "managed" ? replaceManagedBlock(state.code, managedCode) : managedCode;
+        const nextCode = composeManagedCode(state.code);
+        const safe = assertCodeSafe(nextCode);
+        if (!safe.ok) throw new Error(`Refusing to save \u2014 generated code ${safe.reason}`);
         const ok = await state.collection.savePlugin(nextJson, nextCode);
         if (!ok) throw new Error("Thymer rejected the save.");
         const wasStatus = state.status;
@@ -3613,12 +3761,13 @@ ${report}
     /* ── Builder mode ──────────────────────────────────────────── */
     _renderBuilder(state) {
       const color = state.collectionColor || null;
-      const conflict = state.status === "conflict";
+      const hosted = state.status === "hosted";
       const isEnabled = this._draft.enabled !== false;
-      const locked = conflict;
-      const dimmed = conflict || !isEnabled;
-      const statusKind = conflict ? "review" : isEnabled ? "active" : "disabled";
-      const statusLabel = conflict ? "Review" : isEnabled ? "Enabled" : "Disabled";
+      const locked = false;
+      const dimmed = !isEnabled;
+      const statusKind = isEnabled ? "active" : "disabled";
+      const statusLabel = isEnabled ? "Enabled" : "Disabled";
+      const conflict = false;
       return h(
         "div",
         { class: `${ROOT_CLASS}__builder` },
@@ -3652,7 +3801,11 @@ ${report}
             })
           )
         ),
-        conflict ? h("div", { class: `${ROOT_CLASS}__notice ${ROOT_CLASS}__notice--danger` }, "Build Title can\u2019t manage this collection \u2014 it already has custom code.") : null,
+        hosted ? h(
+          "div",
+          { class: `${ROOT_CLASS}__notice` },
+          `This collection is run by ${codeOccupant(state.code) || "another plugin"}. Build Title adds its title hook alongside it \u2014 that plugin keeps working.`
+        ) : null,
         h(
           "div",
           {
@@ -4656,64 +4809,51 @@ ${report}
   function classifyCode(code) {
     const text = String(code || "");
     if (text.includes(MANAGED_START) && text.includes(MANAGED_END)) return "managed";
-    if (!text.trim()) return "blank";
-    if (isSafeToReplaceCollectionCode(text)) return "blank";
-    return "conflict";
+    return classifyCollectionCode(text).kind === "owner" ? "hosted" : "blank";
   }
   __name(classifyCode, "classifyCode");
-  function isSafeToReplaceCollectionCode(code) {
-    const text = stripCommentsAndStrings(code);
-    const customSignals = [
-      "customizeRecordTitle",
-      "customizeSidebarItems",
-      "setSidebarWidget",
-      "addCollectionNavigationButton",
-      "this.properties",
-      "this.views",
-      "this.collection",
-      "this.events",
-      "this.data",
-      "this.ws",
-      "localStorage",
-      "fetch",
-      "savePlugin",
-      "saveConfiguration",
-      "previewPlugin",
-      "insertFromMarkdown",
-      "createRecord",
-      "createLineItem",
-      "prop(",
-      "setName"
-    ];
-    return !customSignals.some((signal) => text.includes(signal));
+  function codeOccupant(code) {
+    return classifyCollectionCode(String(code || "")).occupant || "";
   }
-  __name(isSafeToReplaceCollectionCode, "isSafeToReplaceCollectionCode");
-  function stripCommentsAndStrings(code) {
-    return String(code || "").replace(/\/\*[\s\S]*?\*\//g, "").replace(/\/\/.*$/gm, "").replace(/(['"`])(?:\\[\s\S]|(?!\1)[\s\S])*?\1/g, "");
+  __name(codeOccupant, "codeOccupant");
+  function composeManagedCode(existingCode) {
+    const text = String(existingCode || "");
+    const host = stripStubOwner(stripAllPatchBlocks(text));
+    const owner = declaresPluginOwner(host) ? host : host ? `${host}
+
+${STUB_OWNER_CLASS}` : STUB_OWNER_CLASS;
+    let base = owner;
+    for (const blk of extractPatchBlocks(text)) {
+      if (blk.name === PLUGIN_DISPLAY_NAME) continue;
+      base = `${base.trimEnd()}
+
+${blk.text}
+`;
+    }
+    return replaceOrAppendPatchBlock(base, MANAGED_MARKERS, makeManagedCollectionCode());
   }
-  __name(stripCommentsAndStrings, "stripCommentsAndStrings");
+  __name(composeManagedCode, "composeManagedCode");
   function replaceManagedBlock(code, block) {
-    const text = String(code || "");
-    const start = text.indexOf(MANAGED_START);
-    const end = text.indexOf(MANAGED_END);
-    if (start < 0 || end < start) return block;
-    return `${text.slice(0, start)}${block}${text.slice(end + MANAGED_END.length)}`;
+    return replaceOrAppendPatchBlock(code, MANAGED_MARKERS, block);
   }
   __name(replaceManagedBlock, "replaceManagedBlock");
   function makeManagedCollectionCode() {
-    return String.raw`${MANAGED_START}
-class Plugin extends CollectionPlugin {
-	onLoad() {
-		this.customizeRecordTitle(({record}) => {
-			const conf = this.getConfiguration();
-			const custom = conf && conf.custom ? conf.custom : {};
-			return buildTitleFromProperties(record, custom.buildTitle);
-		});
-	}
-
-	onUnload() {}
-}
-
+    return makePrototypePatchBlock({
+      pluginName: PLUGIN_DISPLAY_NAME,
+      bodyJs: String.raw`
+			var __self = this;
+			this.customizeRecordTitle(function (a) {
+				var conf = __self.getConfiguration();
+				var custom = conf && conf.custom ? conf.custom : {};
+				return buildTitleFromProperties(a && a.record, custom.buildTitle);
+			});
+		`,
+      helpersJs: makeManagedCollectionHelpers()
+    });
+  }
+  __name(makeManagedCollectionCode, "makeManagedCollectionCode");
+  function makeManagedCollectionHelpers() {
+    return String.raw`
 function buildTitleFromProperties(record, rawConfig) {
 	const config = normalizeBuildTitleConfig(rawConfig);
 	if (!config.enabled) return null;
@@ -5046,10 +5186,9 @@ function formatBuildTitleDatePattern(date, pattern) {
 		.replace(/GGGG|YYYY|MMMM|DDDD|dddd|MMM|DDD|ddd|GG|YY|Do|MM|DD|WW|HH|hh|mm|ss|SSS|ZZ|Y|M|D|W|E|H|h|m|s|SS|S|A|a|Z|X|x/g, token => values[token] ?? token)
 		.replace(/\u0000(\d+)\u0000/g, (_match, index) => literals[Number(index)] || '');
 }
-${MANAGED_END}
 `;
   }
-  __name(makeManagedCollectionCode, "makeManagedCollectionCode");
+  __name(makeManagedCollectionHelpers, "makeManagedCollectionHelpers");
   function cloneBuildTitleConfig(raw) {
     const source = raw && typeof raw === "object" ? raw : {};
     const fieldFormats = source.fieldFormats && typeof source.fieldFormats === "object" ? source.fieldFormats : {};
@@ -5249,6 +5388,7 @@ ${MANAGED_END}
   function statusShortLabel(status, enabled) {
     if (status === "managed") return enabled ? "Enabled" : "Disabled";
     if (status === "blank") return "Inactive";
+    if (status === "hosted") return "Available";
     return "Review";
   }
   __name(statusShortLabel, "statusShortLabel");

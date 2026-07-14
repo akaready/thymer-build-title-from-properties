@@ -57,13 +57,29 @@ Enjoy! 🙏
 
 ## ⚙️ How It Works
 
-This is an `AppPlugin`. It cannot directly call collection-only APIs such as
-`customizeRecordTitle()` for every collection, so it acts as a manager:
+This is an `AppPlugin`. Only a `CollectionPlugin` may call `customizeRecordTitle()`, and a
+collection runs exactly **one** `class Plugin` — so to build titles, this plugin has to put code
+into the collection itself.
 
-- blank or already-managed collections can be installed/updated automatically;
-- collections with unrelated custom code are marked as needing review and are not
-  overwritten;
-- per-collection settings live in `plugin.json` at `custom.buildTitle`.
+It does that **without taking the collection over.** It appends a small, clearly-marked block that
+wraps `Plugin.prototype.onLoad`:
+
+```js
+/* Build Title from Properties: managed collection hook - begin */
+…
+/* Build Title from Properties: managed collection hook - end */
+```
+
+The block calls whatever `onLoad` was already there, *then* registers the title hook. So a
+collection that already runs another plugin keeps running it — Recall.ai Meetings, or a plugin of
+your own, or one from someone else entirely. **No cooperation from that plugin is required.** If the
+collection is empty, a minimal `class Plugin` stub is added for the hook to attach to.
+
+The hook is checked before it is written, and if anything about the result looks wrong the
+collection is left exactly as it was and the plugin tells you which one and why. Your other plugins
+keep working either way.
+
+Per-collection settings live in `plugin.json` at `custom.buildTitle`.
 
 Supported template syntax:
 
