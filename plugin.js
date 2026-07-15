@@ -510,27 +510,17 @@ var plugins = (() => {
   opacity: 0.55;
 }
 
+/* "This device" is a normal, saved state (per-device settings), NOT a warning \u2014
+   so it wears the calm brand accent, not an alarming amber. Full-perimeter
+   border, never a single-edge accent. */
 .tps-scope-pill[data-diverged="true"] {
-  color: var(--enum-orange-fg, #d98324);
-  border-color: var(--enum-orange-border, rgba(217, 131, 36, 0.45));
-  background: var(--enum-orange-bg, rgba(217, 131, 36, 0.12));
+  color: var(--tps-accent);
+  border-color: color-mix(in srgb, var(--tps-accent) 45%, transparent);
+  background: var(--tps-accent-soft);
 }
 
 .tps-scope-pill[data-diverged="true"] .tps-scope-dot {
-  background: var(--enum-orange-fg, #d98324);
-  opacity: 1;
-}
-
-/* Device cannot persist settings locally \u2014 the store is falling back to the
-   synced config so nothing is lost. Warning tone, full-perimeter border. */
-.tps-scope-pill[data-local-unavailable="true"] {
-  color: var(--enum-red-fg, #d64545);
-  border-color: var(--enum-red-border, rgba(214, 69, 69, 0.5));
-  background: var(--enum-red-bg, rgba(214, 69, 69, 0.12));
-}
-
-.tps-scope-pill[data-local-unavailable="true"] .tps-scope-dot {
-  background: var(--enum-red-fg, #d64545);
+  background: var(--tps-accent);
   opacity: 1;
 }
 
@@ -2265,29 +2255,12 @@ ${report}
   }
   __name(scopeSvgIcon, "scopeSvgIcon");
   function scopeCluster(scope) {
-    if (scope.localUnavailable) {
-      return h(
-        "span",
-        { class: "tps-scope" },
-        h(
-          "span",
-          {
-            class: "tps-scope-pill tooltip",
-            "data-local-unavailable": "true",
-            "data-tooltip": "This device can't store settings locally, so they're saved to all devices instead.",
-            "data-tooltip-dir": "top"
-          },
-          h("span", { class: "tps-scope-dot", "aria-hidden": "true" }),
-          "All devices (no local storage)"
-        )
-      );
-    }
     const pill = h(
       "span",
       {
         class: "tps-scope-pill tooltip",
         "data-diverged": String(!!scope.diverged),
-        "data-tooltip": scope.diverged ? "These settings currently apply to this device only" : "Settings are synced \u2014 changes here start as this-device-only",
+        "data-tooltip": scope.diverged ? "Custom settings for this device, saved automatically. Your other devices are unaffected." : "Using your shared defaults \u2014 the same on all your devices. Edits here apply to this device only.",
         "data-tooltip-dir": "top"
       },
       h("span", { class: "tps-scope-dot", "aria-hidden": "true" }),
@@ -2299,9 +2272,9 @@ ${report}
     const push = h("button", {
       type: "button",
       class: "tps-scope-btn tps-scope-btn--push tooltip",
-      "data-tooltip": "Apply these settings to all devices",
+      "data-tooltip": "Copy these settings to all my devices",
       "data-tooltip-dir": "top",
-      "aria-label": "Apply these settings to all devices",
+      "aria-label": "Copy these settings to all my devices",
       onClick: /* @__PURE__ */ __name((e) => {
         const btn = (
           /** @type {HTMLButtonElement} */
@@ -2320,9 +2293,9 @@ ${report}
     const discard = h("button", {
       type: "button",
       class: "tps-scope-btn tps-scope-btn--discard tooltip",
-      "data-tooltip": "Discard device changes \u2014 revert to synced settings",
+      "data-tooltip": "Reset this device to your shared defaults",
       "data-tooltip-dir": "top",
-      "aria-label": "Discard device changes",
+      "aria-label": "Reset this device to your shared defaults",
       onClick: /* @__PURE__ */ __name((e) => {
         const btn = (
           /** @type {HTMLButtonElement} */
@@ -2330,11 +2303,11 @@ ${report}
         );
         if (btn.getAttribute("data-armed") !== "true") {
           btn.setAttribute("data-armed", "true");
-          btn.setAttribute("data-tooltip", "Tap again to discard device changes");
+          btn.setAttribute("data-tooltip", "Tap again to reset this device");
           clearTimeout(disarmTimer);
           disarmTimer = window.setTimeout(() => {
             btn.removeAttribute("data-armed");
-            btn.setAttribute("data-tooltip", "Discard device changes \u2014 revert to synced settings");
+            btn.setAttribute("data-tooltip", "Reset this device to your shared defaults");
           }, 3e3);
           return;
         }
