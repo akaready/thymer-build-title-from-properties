@@ -2826,7 +2826,7 @@ class Plugin extends CollectionPlugin {
   __name(assertCodeSafe, "assertCodeSafe");
 
   // plugin.js
-  var PLUGIN_VERSION = "1.2.2";
+  var PLUGIN_VERSION = "1.2.3";
   var ROOT_CLASS = "plg-build-title-from-properties";
   var PANEL_TYPE = "build-title-from-properties-settings";
   var CONFIG_KEY = "buildTitle";
