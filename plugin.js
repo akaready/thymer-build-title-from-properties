@@ -2523,6 +2523,49 @@ ${report}
   __name(injectTooltipCss, "injectTooltipCss");
 
   // ../../shared/plugin-version.js
+  var CONFIG_WRITE_QUEUES_KEY = "__tpsPluginConfigWriteQueues";
+  function configWriteIdentity(plugin) {
+    let workspace = "default";
+    try {
+      workspace = plugin.getWorkspaceGuid?.() || "default";
+    } catch {
+    }
+    let guid = "";
+    try {
+      guid = plugin.getGuid?.() || plugin.collection?.getGuid?.() || "";
+    } catch {
+    }
+    let name = "plugin";
+    try {
+      name = plugin.getConfiguration?.()?.name || "plugin";
+    } catch {
+    }
+    return `${workspace}/${guid || name}`;
+  }
+  __name(configWriteIdentity, "configWriteIdentity");
+  function queuePluginConfigWrite(plugin, task) {
+    let queues;
+    try {
+      const root = (
+        /** @type {any} */
+        globalThis
+      );
+      if (!(root[CONFIG_WRITE_QUEUES_KEY] instanceof Map)) root[CONFIG_WRITE_QUEUES_KEY] = /* @__PURE__ */ new Map();
+      queues = root[CONFIG_WRITE_QUEUES_KEY];
+    } catch {
+      return Promise.resolve().then(task);
+    }
+    const key = configWriteIdentity(plugin);
+    const prior = queues.get(key) || Promise.resolve();
+    const result = prior.then(task, task);
+    const tail = result.then(() => void 0, () => void 0);
+    queues.set(key, tail);
+    void tail.then(() => {
+      if (queues.get(key) === tail) queues.delete(key);
+    });
+    return result;
+  }
+  __name(queuePluginConfigWrite, "queuePluginConfigWrite");
   function readPluginVersion(conf, fallback = "0.0.1") {
     if (!conf || typeof conf !== "object") return fallback;
     if (typeof conf.version === "string" && conf.version) return conf.version;
@@ -2577,6 +2620,10 @@ ${report}
   }
   __name(resolveConfigApi, "resolveConfigApi");
   async function syncPluginVersionOnLoad(plugin, pluginVersion, customPatch = {}) {
+    return queuePluginConfigWrite(plugin, () => syncPluginVersionOnLoadNow(plugin, pluginVersion, customPatch));
+  }
+  __name(syncPluginVersionOnLoad, "syncPluginVersionOnLoad");
+  async function syncPluginVersionOnLoadNow(plugin, pluginVersion, customPatch = {}) {
     const api = await resolveConfigApi(plugin);
     if (!api) return;
     let conf = {};
@@ -2605,7 +2652,7 @@ ${report}
     } catch {
     }
   }
-  __name(syncPluginVersionOnLoad, "syncPluginVersionOnLoad");
+  __name(syncPluginVersionOnLoadNow, "syncPluginVersionOnLoadNow");
 
   // ../../shared/plugin-kill-switch.js
   var MARKER_SYNC_HORIZON_MS = 9e4;
@@ -2672,24 +2719,37 @@ ${report}
   }
   __name(readKillSwitch, "readKillSwitch");
   async function setPluginDisabled(plugin, disabled, pluginVersion, customPatch = {}) {
+    return queuePluginConfigWrite(plugin, () => setPluginDisabledNow(plugin, disabled, pluginVersion, customPatch));
+  }
+  __name(setPluginDisabled, "setPluginDisabled");
+  async function setPluginDisabledNow(plugin, disabled, pluginVersion, customPatch) {
     const api = await resolveConfigApi(plugin);
-    if (!api) return;
+    if (!api) return false;
     let conf = {};
     try {
       conf = api.getConfiguration?.() || plugin.getConfiguration?.() || {};
     } catch {
-      return;
+      return false;
     }
-    if (typeof conf.name !== "string" || !conf.name.trim()) return;
-    if (readKillSwitch(plugin) === disabled && isPluginDisabled(conf) === disabled) return;
+    if (typeof conf.name !== "string" || !conf.name.trim()) return false;
+    const custom = conf.custom && typeof conf.custom === "object" ? (
+      /** @type {Record<string, unknown>} */
+      conf.custom
+    ) : {};
+    const resolvedPatch = typeof customPatch === "function" ? customPatch(custom) : customPatch;
+    const patch = resolvedPatch && typeof resolvedPatch === "object" ? resolvedPatch : {};
+    if (!Object.keys(patch).length && readKillSwitch(plugin) === disabled && isPluginDisabled(conf) === disabled) return true;
     writeKillSwitchMarker(plugin, disabled);
     try {
-      await api.saveConfiguration(configWithPluginVersion(conf, { ...customPatch, pluginDisabled: disabled }, pluginVersion));
+      const result = await api.saveConfiguration(configWithPluginVersion(conf, { ...patch, pluginDisabled: disabled }, pluginVersion));
+      if (result === false) throw new Error("Thymer rejected the config save.");
+      return true;
     } catch {
       clearKillSwitchMarker(plugin);
+      return false;
     }
   }
-  __name(setPluginDisabled, "setPluginDisabled");
+  __name(setPluginDisabledNow, "setPluginDisabledNow");
 
   // ../../shared/collection-code.js
   function patchBlockMarkers(pluginName) {
@@ -2826,7 +2886,7 @@ class Plugin extends CollectionPlugin {
   __name(assertCodeSafe, "assertCodeSafe");
 
   // plugin.js
-  var PLUGIN_VERSION = "1.2.3";
+  var PLUGIN_VERSION = "1.2.4";
   var ROOT_CLASS = "plg-build-title-from-properties";
   var PANEL_TYPE = "build-title-from-properties-settings";
   var CONFIG_KEY = "buildTitle";
@@ -3040,6 +3100,8 @@ class Plugin extends CollectionPlugin {
       this._draft = cloneBuildTitleConfig(null);
       this._loading = false;
       this._saving = false;
+      this._saveQueued = false;
+      this._draftRevision = 0;
       this._message = "";
       this.ui.injectCSS(PANEL_CSS);
       this.ui.injectCSS(this._css());
@@ -3189,6 +3251,11 @@ class Plugin extends CollectionPlugin {
       }
     }
     onUnload() {
+      if (this._autosaveTimer) {
+        clearTimeout(this._autosaveTimer);
+        this._autosaveTimer = null;
+        void this._commitSave(this._draft.enabled !== false);
+      }
       for (const id of this._handlerIds || []) this.events.off(id);
       this._handlerIds = [];
       if (window.__btpGlobalClick) {
@@ -3331,7 +3398,10 @@ class Plugin extends CollectionPlugin {
       } catch {
       }
       try {
-        const raw = JSON.parse(localStorage.getItem(`collection-colors/${this.getWorkspaceGuid()}/colors`) || "{}") || {};
+        const cached = localStorage.getItem(`collection-colors/${this.getWorkspaceGuid()}/colors`);
+        if (cached === null) return out;
+        const raw = JSON.parse(cached) || {};
+        for (const key of Object.keys(out)) delete out[key];
         for (const guid of Object.keys(raw)) {
           const color = raw[guid] && typeof raw[guid].color === "string" ? raw[guid].color : null;
           if (color) out[guid] = color;
@@ -3343,9 +3413,41 @@ class Plugin extends CollectionPlugin {
     }
     _syncDraftFromSelected() {
       const state = this._selectedState();
-      this._draft = cloneBuildTitleConfig(state ? state.config : null);
+      const recovered = state ? this._readDraftRecovery(state.guid) : null;
+      this._draft = cloneBuildTitleConfig(recovered || (state ? state.config : null));
       this._editorTemplate = displayTemplateFromConfig(this._draft.template, state);
       this._activeFormatFieldId = findFirstTemplateDateField(this._draft.template, state);
+      if (recovered) this._scheduleAutosave();
+    }
+    _draftRecoveryKey(guid) {
+      let workspace = "default";
+      try {
+        workspace = this.getWorkspaceGuid?.() || "default";
+      } catch {
+      }
+      return `build-title-from-properties/${workspace}/${guid || "collection"}/draft`;
+    }
+    _readDraftRecovery(guid) {
+      try {
+        const raw = localStorage.getItem(this._draftRecoveryKey(guid));
+        return raw ? cloneBuildTitleConfig(JSON.parse(raw)) : null;
+      } catch {
+        return null;
+      }
+    }
+    _writeDraftRecovery() {
+      const state = this._selectedState();
+      if (!state) return;
+      try {
+        localStorage.setItem(this._draftRecoveryKey(state.guid), JSON.stringify(cloneBuildTitleConfig(this._draft)));
+      } catch {
+      }
+    }
+    _clearDraftRecovery(guid) {
+      try {
+        localStorage.removeItem(this._draftRecoveryKey(guid));
+      } catch {
+      }
     }
     async _loadSelectedRecords() {
       const state = this._selectedState();
@@ -3425,28 +3527,30 @@ class Plugin extends CollectionPlugin {
         }
         for (const collection of collections || []) {
           try {
-            const existing = await collection.getExistingCodeAndConfig();
-            const code = existing && typeof existing.code === "string" ? existing.code : "";
-            const status = classifyCode(code);
-            const jsonNow = existing && existing.json ? existing.json : collection.getConfiguration ? collection.getConfiguration() : {};
-            const cfgNow = jsonNow && jsonNow.custom ? jsonNow.custom[CONFIG_KEY] : null;
-            const weManageIt = status === "managed" || cfgNow && typeof cfgNow === "object";
-            if (!weManageIt) continue;
-            const nextCode = composeManagedCode(code);
-            if (nextCode === code) continue;
-            const safe = assertCodeSafe(nextCode);
-            if (!safe.ok) {
-              this._migrationRefusals.push(`${collection.getName ? collection.getName() : "collection"}: ${safe.reason}`);
-              continue;
-            }
-            const json = existing && existing.json ? existing.json : collection.getConfiguration ? collection.getConfiguration() : {};
-            const ok = await collection.savePlugin(json, nextCode);
-            if (!ok) continue;
-            const state = this._collections.find((s) => s.guid === collection.getGuid());
-            if (state) {
-              state.code = nextCode;
-              state.status = "managed";
-            }
+            await queuePluginConfigWrite(collection, async () => {
+              const existing = await collection.getExistingCodeAndConfig();
+              const code = existing && typeof existing.code === "string" ? existing.code : "";
+              const status = classifyCode(code);
+              const jsonNow = existing && existing.json ? existing.json : collection.getConfiguration ? collection.getConfiguration() : {};
+              const cfgNow = jsonNow && jsonNow.custom ? jsonNow.custom[CONFIG_KEY] : null;
+              const weManageIt = status === "managed" || cfgNow && typeof cfgNow === "object";
+              if (!weManageIt) return;
+              const nextCode = composeManagedCode(code);
+              if (nextCode === code) return;
+              const safe = assertCodeSafe(nextCode);
+              if (!safe.ok) {
+                this._migrationRefusals.push(`${collection.getName ? collection.getName() : "collection"}: ${safe.reason}`);
+                return;
+              }
+              const ok = await collection.savePlugin(jsonNow, nextCode);
+              if (!ok) return;
+              const state = this._collections.find((s) => s.guid === collection.getGuid());
+              if (state) {
+                state.json = cloneJson(jsonNow);
+                state.code = nextCode;
+                state.status = "managed";
+              }
+            });
           } catch {
           }
         }
@@ -3481,6 +3585,8 @@ class Plugin extends CollectionPlugin {
     _scheduleAutosave() {
       const state = this._selectedState();
       if (!state || state.status === "conflict") return;
+      this._draftRevision += 1;
+      this._writeDraftRecovery();
       if (this._autosaveTimer) clearTimeout(this._autosaveTimer);
       this._autosaveTimer = setTimeout(() => {
         this._autosaveTimer = null;
@@ -3494,6 +3600,8 @@ class Plugin extends CollectionPlugin {
       }
       const next = !(this._draft.enabled !== false);
       this._draft = cloneBuildTitleConfig({ ...this._draft, enabled: next });
+      this._draftRevision += 1;
+      this._writeDraftRecovery();
       this._renderPanel();
       await this._commitSave(next);
     }
@@ -3597,28 +3705,45 @@ class Plugin extends CollectionPlugin {
     async _commitSave(enabled = true) {
       const state = this._selectedState();
       if (!state || state.status === "conflict") return;
+      if (this._saving) {
+        this._saveQueued = true;
+        return;
+      }
       this._syncTemplateBeforeSave();
+      this._writeDraftRecovery();
+      const revisionAtStart = this._draftRevision;
       this._saving = true;
       try {
         const nextConfig = cloneBuildTitleConfig({ ...this._draft, enabled });
-        const nextJson = cloneJson(state.json);
-        nextJson.custom = nextJson.custom && typeof nextJson.custom === "object" ? nextJson.custom : {};
-        nextJson.custom[CONFIG_KEY] = nextConfig;
-        const nextCode = composeManagedCode(state.code);
-        const safe = assertCodeSafe(nextCode);
-        if (!safe.ok) throw new Error(`Refusing to save \u2014 generated code ${safe.reason}`);
-        const ok = await state.collection.savePlugin(nextJson, nextCode);
-        if (!ok) throw new Error("Thymer rejected the save.");
+        const saved = await queuePluginConfigWrite(state.collection, async () => {
+          const existing = await state.collection.getExistingCodeAndConfig();
+          const liveJson = existing && existing.json ? existing.json : state.collection.getConfiguration ? state.collection.getConfiguration() : state.json;
+          const liveCode = existing && typeof existing.code === "string" ? existing.code : state.code;
+          const nextJson = cloneJson(liveJson);
+          nextJson.custom = nextJson.custom && typeof nextJson.custom === "object" ? nextJson.custom : {};
+          nextJson.custom[CONFIG_KEY] = nextConfig;
+          const nextCode = composeManagedCode(liveCode);
+          const safe = assertCodeSafe(nextCode);
+          if (!safe.ok) throw new Error(`Refusing to save \u2014 generated code ${safe.reason}`);
+          const ok = await state.collection.savePlugin(nextJson, nextCode);
+          if (!ok) throw new Error("Thymer rejected the save.");
+          return { nextJson, nextCode };
+        });
         const wasStatus = state.status;
-        state.json = nextJson;
-        state.code = nextCode;
-        state.config = cloneBuildTitleConfig(nextJson.custom[CONFIG_KEY]);
+        state.json = saved.nextJson;
+        state.code = saved.nextCode;
+        state.config = cloneBuildTitleConfig(saved.nextJson.custom[CONFIG_KEY]);
         state.status = "managed";
-        this._saving = false;
+        if (this._draftRevision === revisionAtStart) this._clearDraftRecovery(state.guid);
         if (wasStatus !== "managed") this._renderPanel();
       } catch (err) {
-        this._saving = false;
         this._toast("Couldn't save", err && err.message ? err.message : String(err));
+      } finally {
+        this._saving = false;
+        if (this._saveQueued) {
+          this._saveQueued = false;
+          void this._commitSave(this._draft.enabled !== false);
+        }
       }
     }
     _renderPanel() {
