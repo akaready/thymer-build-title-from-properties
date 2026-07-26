@@ -2151,7 +2151,9 @@ ${report}
   __name(appendChildren, "appendChildren");
   function panel({ pluginClass } = {}, children = []) {
     const cls = ["tps-panel", pluginClass].filter(Boolean).join(" ");
-    return h("div", { class: cls }, ...children);
+    const root = h("div", { class: cls }, ...children);
+    restoreSectionState(root, pluginClass || "");
+    return root;
   }
   __name(panel, "panel");
   function pluginHeader({
@@ -2440,6 +2442,45 @@ ${report}
     });
   }
   __name(pluginHeaderFromConfig, "pluginHeaderFromConfig");
+  var SECTION_STATE = (() => {
+    const g = (
+      /** @type {Record<string, any>} */
+      /** @type {unknown} */
+      globalThis
+    );
+    if (!g.__tpsSectionState) g.__tpsSectionState = /* @__PURE__ */ new Map();
+    return (
+      /** @type {Map<string, boolean>} */
+      g.__tpsSectionState
+    );
+  })();
+  function sectionStateKey(el2, key) {
+    const scope = (
+      /** @type {HTMLElement} */
+      el2.dataset.sectionScope || ""
+    );
+    return scope + "::" + key;
+  }
+  __name(sectionStateKey, "sectionStateKey");
+  function restoreSectionState(root, scope) {
+    const nodes = root.querySelectorAll(".tps-section--collapsible[data-section-key]");
+    for (const node of nodes) {
+      const el2 = (
+        /** @type {HTMLElement} */
+        node
+      );
+      el2.dataset.sectionScope = scope;
+      const key = el2.dataset.sectionKey || "";
+      const remembered = SECTION_STATE.get(sectionStateKey(el2, key));
+      if (remembered === void 0) continue;
+      const apply = (
+        /** @type {any} */
+        el2._tpsSetOpen
+      );
+      if (typeof apply === "function") apply(remembered, true);
+    }
+  }
+  __name(restoreSectionState, "restoreSectionState");
   function optionRow({ type = "checkbox", name, value, label, desc, checked, onChange }) {
     const input = h("input", {
       type,
@@ -2886,7 +2927,7 @@ class Plugin extends CollectionPlugin {
   __name(assertCodeSafe, "assertCodeSafe");
 
   // plugin.js
-  var PLUGIN_VERSION = "1.2.4";
+  var PLUGIN_VERSION = "1.2.5";
   var ROOT_CLASS = "plg-build-title-from-properties";
   var PANEL_TYPE = "build-title-from-properties-settings";
   var CONFIG_KEY = "buildTitle";
@@ -3380,8 +3421,24 @@ class Plugin extends CollectionPlugin {
         fields,
         collectionColor: this._collectionColors[collection.getGuid()] || null,
         status: classifyCode(code),
-        config: cloneBuildTitleConfig(json.custom && json.custom[CONFIG_KEY])
+        config: this._resolveConfig(collection.getGuid(), json)
       };
+    }
+    /**
+     * The collection's title config. Present — even empty — is the truth. Absent
+     * means either never configured, or something wiped the collection's
+     * `custom`; the mirror distinguishes those, since it only exists once a real
+     * config has been saved. See _configMirrorKey.
+     * @param {string} guid @param {any} json
+     */
+    _resolveConfig(guid, json) {
+      const stored = json && json.custom ? json.custom[CONFIG_KEY] : void 0;
+      if (stored !== void 0) {
+        this._writeConfigMirror(guid, stored);
+        return cloneBuildTitleConfig(stored);
+      }
+      const mirrored = this._readConfigMirror(guid);
+      return mirrored ? cloneBuildTitleConfig(mirrored) : cloneBuildTitleConfig(void 0);
     }
     async _loadCollectionColors() {
       const out = {};
@@ -3447,6 +3504,46 @@ class Plugin extends CollectionPlugin {
       try {
         localStorage.removeItem(this._draftRecoveryKey(guid));
       } catch {
+      }
+    }
+    /**
+     * Durable per-collection mirror of the saved config.
+     *
+     * Distinct from the draft journal above, which is an un-saved edit and is
+     * cleared the moment the save lands. This one holds the CONFIRMED config and
+     * is never cleared, because `custom.buildTitle` lives in the collection's own
+     * config — and anything that replaces that `custom` wholesale (a plugin
+     * manager reinstalling the collection, for one) takes the whole title
+     * configuration with it.
+     *
+     * Only ever read when the collection's config key is ABSENT, so a stale copy
+     * can never outvote a live one, and a config that legitimately has no title
+     * rule is left alone.
+     * @param {string} guid
+     */
+    _configMirrorKey(guid) {
+      let workspace = "default";
+      try {
+        workspace = this.getWorkspaceGuid?.() || "default";
+      } catch {
+      }
+      return `build-title-from-properties/${workspace}/${guid || "collection"}/config-mirror`;
+    }
+    /** @param {string} guid @param {any} config */
+    _writeConfigMirror(guid, config) {
+      try {
+        if (!guid || !config || typeof config !== "object") return;
+        localStorage.setItem(this._configMirrorKey(guid), JSON.stringify(cloneBuildTitleConfig(config)));
+      } catch {
+      }
+    }
+    /** @param {string} guid @returns {any} */
+    _readConfigMirror(guid) {
+      try {
+        const raw = localStorage.getItem(this._configMirrorKey(guid));
+        return raw ? cloneBuildTitleConfig(JSON.parse(raw)) : null;
+      } catch {
+        return null;
       }
     }
     async _loadSelectedRecords() {
@@ -3533,6 +3630,9 @@ class Plugin extends CollectionPlugin {
               const status = classifyCode(code);
               const jsonNow = existing && existing.json ? existing.json : collection.getConfiguration ? collection.getConfiguration() : {};
               const cfgNow = jsonNow && jsonNow.custom ? jsonNow.custom[CONFIG_KEY] : null;
+              if (cfgNow && typeof cfgNow === "object") {
+                this._writeConfigMirror(collection.getGuid(), cfgNow);
+              }
               const weManageIt = status === "managed" || cfgNow && typeof cfgNow === "object";
               if (!weManageIt) return;
               const nextCode = composeManagedCode(code);
@@ -3734,6 +3834,7 @@ class Plugin extends CollectionPlugin {
         state.code = saved.nextCode;
         state.config = cloneBuildTitleConfig(saved.nextJson.custom[CONFIG_KEY]);
         state.status = "managed";
+        this._writeConfigMirror(state.guid, saved.nextJson.custom[CONFIG_KEY]);
         if (this._draftRevision === revisionAtStart) this._clearDraftRecovery(state.guid);
         if (wasStatus !== "managed") this._renderPanel();
       } catch (err) {
