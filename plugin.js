@@ -2927,7 +2927,7 @@ class Plugin extends CollectionPlugin {
   __name(assertCodeSafe, "assertCodeSafe");
 
   // plugin.js
-  var PLUGIN_VERSION = "1.2.5";
+  var PLUGIN_VERSION = "1.3.0";
   var ROOT_CLASS = "plg-build-title-from-properties";
   var PANEL_TYPE = "build-title-from-properties-settings";
   var CONFIG_KEY = "buildTitle";
@@ -3594,6 +3594,7 @@ class Plugin extends CollectionPlugin {
       this._mode = "edit";
       this._paletteQuery = "";
       this._datePopoverFieldId = null;
+      this._confirmRemove = false;
       this._message = "";
       this._syncDraftFromSelected();
       this._renderPanel();
@@ -3606,10 +3607,22 @@ class Plugin extends CollectionPlugin {
      * build (e.g. one that stripped %faded% at render time). Silent, on-demand,
      * only when the injected block actually differs — no manual re-save needed.
      */
+    /** This AppPlugin's own guid, baked into the injected hook so an orphaned
+     *  collection (plugin deleted) can detect it and stop taking over titles. */
+    _appGuid() {
+      if (this.__appGuidCache !== void 0) return this.__appGuidCache;
+      let g = "";
+      try {
+        g = typeof this.getGuid === "function" ? String(this.getGuid() || "") : "";
+      } catch {
+      }
+      this.__appGuidCache = g;
+      return g;
+    }
     _migrateStaleManaged() {
       const state = this._selectedState();
       if (!state || state.status !== "managed") return;
-      const refreshed = replaceManagedBlock(state.code, makeManagedCollectionCode());
+      const refreshed = replaceManagedBlock(state.code, makeManagedCollectionCode(this._appGuid()));
       if (refreshed !== state.code) void this._commitSave(this._draft.enabled !== false);
     }
     async _migrateManagedHooksInBackground() {
@@ -3635,7 +3648,7 @@ class Plugin extends CollectionPlugin {
               }
               const weManageIt = status === "managed" || cfgNow && typeof cfgNow === "object";
               if (!weManageIt) return;
-              const nextCode = composeManagedCode(code);
+              const nextCode = composeManagedCode(code, this._appGuid());
               if (nextCode === code) return;
               const safe = assertCodeSafe(nextCode);
               if (!safe.ok) {
@@ -3672,6 +3685,7 @@ class Plugin extends CollectionPlugin {
       }
       this._mode = "list";
       this._datePopoverFieldId = null;
+      this._confirmRemove = false;
       this._message = "";
       this._renderPanel();
       if (this._collections.some((s) => s.sampleRecord === void 0)) void this._loadSampleRecords();
@@ -3704,6 +3718,57 @@ class Plugin extends CollectionPlugin {
       this._writeDraftRecovery();
       this._renderPanel();
       await this._commitSave(next);
+    }
+    /**
+     * Remove this collection's rule entirely: strip our patch block from the
+     * collection code and delete its buildTitle config, restoring a fully normal
+     * (editable-title) collection. Any host plugin + other plugins' patches are
+     * preserved; only if we were the sole occupant is the code cleared to blank.
+     */
+    async _removeRule() {
+      const state = this._selectedState();
+      if (!state || this._saving) return;
+      if (this._autosaveTimer) {
+        clearTimeout(this._autosaveTimer);
+        this._autosaveTimer = null;
+      }
+      this._confirmRemove = false;
+      this._saving = true;
+      this._renderPanel();
+      try {
+        const saved = await queuePluginConfigWrite(state.collection, async () => {
+          const existing = await state.collection.getExistingCodeAndConfig();
+          const liveJson = existing && existing.json ? existing.json : state.collection.getConfiguration ? state.collection.getConfiguration() : state.json;
+          const liveCode = existing && typeof existing.code === "string" ? existing.code : state.code;
+          const nextJson = cloneJson(liveJson);
+          if (nextJson.custom && typeof nextJson.custom === "object") delete nextJson.custom[CONFIG_KEY];
+          let nextCode = removeManagedBlock(liveCode);
+          const otherPatches = extractPatchBlocks(nextCode);
+          const host = stripStubOwner(stripAllPatchBlocks(nextCode)).trim();
+          if (!otherPatches.length && !host) nextCode = "";
+          const safe = assertCodeSafe(nextCode);
+          if (!safe.ok) throw new Error(`Refusing to save \u2014 generated code ${safe.reason}`);
+          const ok = await state.collection.savePlugin(nextJson, nextCode);
+          if (!ok) throw new Error("Thymer rejected the save.");
+          return { nextJson, nextCode };
+        });
+        state.json = saved.nextJson;
+        state.code = saved.nextCode;
+        state.config = cloneBuildTitleConfig(null);
+        state.status = classifyCode(saved.nextCode);
+        try {
+          localStorage.removeItem(this._configMirrorKey(state.guid));
+        } catch {
+        }
+        this._clearDraftRecovery(state.guid);
+        this._toast("Rule removed", `Build Title no longer manages ${state.name}. Titles are editable again.`);
+        this._saving = false;
+        this._exitEdit();
+      } catch (err) {
+        this._saving = false;
+        this._toast("Couldn't remove", err && err.message ? err.message : String(err));
+        this._renderPanel();
+      }
     }
     _insertToken(token, ev) {
       const editor = this._queryLive(`.${ROOT_CLASS}__template-input`, ev);
@@ -3822,7 +3887,7 @@ class Plugin extends CollectionPlugin {
           const nextJson = cloneJson(liveJson);
           nextJson.custom = nextJson.custom && typeof nextJson.custom === "object" ? nextJson.custom : {};
           nextJson.custom[CONFIG_KEY] = nextConfig;
-          const nextCode = composeManagedCode(liveCode);
+          const nextCode = composeManagedCode(liveCode, this._appGuid());
           const safe = assertCodeSafe(nextCode);
           if (!safe.ok) throw new Error(`Refusing to save \u2014 generated code ${safe.reason}`);
           const ok = await state.collection.savePlugin(nextJson, nextCode);
@@ -4028,12 +4093,20 @@ class Plugin extends CollectionPlugin {
           h(
             "div",
             { class: `${ROOT_CLASS}__builder-actions` },
-            conflict ? null : button({
-              label: isEnabled ? "Disable" : "Enable",
-              variant: isEnabled ? "danger" : "primary",
-              onClick: /* @__PURE__ */ __name(() => void this._toggleEnabled(), "onClick"),
-              disabled: this._saving
-            })
+            conflict ? null : this._confirmRemove ? [
+              h("span", { class: `${ROOT_CLASS}__confirm-label` }, "Remove this rule?"),
+              button({ label: "Remove", variant: "danger", onClick: /* @__PURE__ */ __name(() => void this._removeRule(), "onClick"), disabled: this._saving }),
+              button({ label: "Cancel", variant: "ghost", onClick: /* @__PURE__ */ __name(() => {
+                this._confirmRemove = false;
+                this._renderPanel();
+              }, "onClick"), disabled: this._saving })
+            ] : [
+              button({ label: isEnabled ? "Disable" : "Enable", variant: isEnabled ? "danger" : "primary", onClick: /* @__PURE__ */ __name(() => void this._toggleEnabled(), "onClick"), disabled: this._saving }),
+              state.status === "managed" ? button({ label: "Remove", variant: "ghost", onClick: /* @__PURE__ */ __name(() => {
+                this._confirmRemove = true;
+                this._renderPanel();
+              }, "onClick"), disabled: this._saving }) : null
+            ]
           )
         ),
         hosted ? h(
@@ -4643,6 +4716,12 @@ class Plugin extends CollectionPlugin {
 				align-items: center;
 				gap: var(--tps-space-2);
 				flex: 0 0 auto;
+				flex-wrap: wrap;
+			}
+			.${ROOT_CLASS}-panel .${ROOT_CLASS}__confirm-label {
+				font-size: var(--tps-fs-hint);
+				color: var(--tps-danger);
+				font-weight: var(--tps-fw-medium);
 			}
 
 			/* \u2500\u2500 Preview \u2500\u2500 */
@@ -5051,7 +5130,7 @@ class Plugin extends CollectionPlugin {
     return classifyCollectionCode(String(code || "")).occupant || "";
   }
   __name(codeOccupant, "codeOccupant");
-  function composeManagedCode(existingCode) {
+  function composeManagedCode(existingCode, appGuid) {
     const text = String(existingCode || "");
     const host = stripStubOwner(stripAllPatchBlocks(text));
     const owner = declaresPluginOwner(host) ? host : host ? `${host}
@@ -5065,19 +5144,42 @@ ${STUB_OWNER_CLASS}` : STUB_OWNER_CLASS;
 ${blk.text}
 `;
     }
-    return replaceOrAppendPatchBlock(base, MANAGED_MARKERS, makeManagedCollectionCode());
+    return replaceOrAppendPatchBlock(base, MANAGED_MARKERS, makeManagedCollectionCode(appGuid));
   }
   __name(composeManagedCode, "composeManagedCode");
   function replaceManagedBlock(code, block) {
     return replaceOrAppendPatchBlock(code, MANAGED_MARKERS, block);
   }
   __name(replaceManagedBlock, "replaceManagedBlock");
-  function makeManagedCollectionCode() {
+  function removeManagedBlock(code) {
+    const text = String(code || "");
+    const start = text.indexOf(MANAGED_START);
+    const end = text.indexOf(MANAGED_END);
+    if (start < 0 || end < start) return text;
+    return `${text.slice(0, start)}${text.slice(end + MANAGED_END.length)}`;
+  }
+  __name(removeManagedBlock, "removeManagedBlock");
+  function makeManagedCollectionCode(appGuid) {
+    const guidLit = JSON.stringify(String(appGuid || ""));
     return makePrototypePatchBlock({
       pluginName: PLUGIN_DISPLAY_NAME,
       bodyJs: String.raw`
 			var __self = this;
-			this.customizeRecordTitle(function (a) {
+			// Registering customizeRecordTitle makes titles COMPUTED (un-editable)
+			// collection-wide, so only take over titles when BOTH hold:
+			//  (1) the managing Build Title plugin is still installed, and
+			//  (2) this collection's rule is enabled.
+			// A disabled rule, or a plugin that has been deleted, registers nothing
+			// and leaves record titles fully editable.
+			var __appGuid = ${guidLit};
+			try {
+				if (__appGuid && __self.data && typeof __self.data.getPluginByGuid === 'function'
+					&& !__self.data.getPluginByGuid(__appGuid)) return;
+			} catch (e) {}
+			var __conf0 = __self.getConfiguration();
+			var __bt0 = __conf0 && __conf0.custom ? __conf0.custom.buildTitle : null;
+			if (!__bt0 || __bt0.enabled === false) return;
+			__self.customizeRecordTitle(function (a) {
 				var conf = __self.getConfiguration();
 				var custom = conf && conf.custom ? conf.custom : {};
 				return buildTitleFromProperties(a && a.record, custom.buildTitle);
