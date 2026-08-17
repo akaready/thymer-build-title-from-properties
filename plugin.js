@@ -2927,7 +2927,7 @@ class Plugin extends CollectionPlugin {
   __name(assertCodeSafe, "assertCodeSafe");
 
   // plugin.js
-  var PLUGIN_VERSION = "1.3.0";
+  var PLUGIN_VERSION = "1.3.1";
   var ROOT_CLASS = "plg-build-title-from-properties";
   var PANEL_TYPE = "build-title-from-properties-settings";
   var CONFIG_KEY = "buildTitle";
@@ -3746,8 +3746,10 @@ class Plugin extends CollectionPlugin {
           const otherPatches = extractPatchBlocks(nextCode);
           const host = stripStubOwner(stripAllPatchBlocks(nextCode)).trim();
           if (!otherPatches.length && !host) nextCode = "";
-          const safe = assertCodeSafe(nextCode);
-          if (!safe.ok) throw new Error(`Refusing to save \u2014 generated code ${safe.reason}`);
+          if (nextCode.trim()) {
+            const safe = assertCodeSafe(nextCode);
+            if (!safe.ok) throw new Error(`Refusing to save \u2014 generated code ${safe.reason}`);
+          }
           const ok = await state.collection.savePlugin(nextJson, nextCode);
           if (!ok) throw new Error("Thymer rejected the save.");
           return { nextJson, nextCode };
